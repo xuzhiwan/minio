@@ -90,7 +90,6 @@ func (m *metacacheManager) initManager() {
 			}
 			m.mu.Unlock()
 		}
-		m.getTransient().deleteAll()
 	}()
 }
 
@@ -122,11 +121,11 @@ func (m *metacacheManager) updateCacheEntry(update metacache) (metacache, error)
 	}
 
 	b, ok := m.buckets[update.bucket]
+	m.mu.RUnlock()
 	if ok {
-		m.mu.RUnlock()
 		return b.updateCacheEntry(update)
 	}
-	m.mu.RUnlock()
+
 	// We should have either a trashed bucket or this
 	return metacache{}, errVolumeNotFound
 }

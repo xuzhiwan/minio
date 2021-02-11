@@ -819,10 +819,6 @@ func listPathRaw(ctx context.Context, opts listPathRawOptions) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Disconnect from call above, but cancel on exit.
-	ctx, cancel := context.WithCancel(GlobalContext)
-	defer cancel()
-
 	askDisks := len(disks)
 	readers := make([]*metacacheReader, askDisks)
 	for i := range disks {
