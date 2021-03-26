@@ -815,6 +815,9 @@ func listPathRaw(ctx context.Context, opts listPathRawOptions) (err error) {
 	if len(disks) == 0 {
 		return fmt.Errorf("listPathRaw: 0 drives provided")
 	}
+	// Cancel upstream if we finish before we expect.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Disconnect from call above, but cancel on exit.
 	ctx, cancel := context.WithCancel(GlobalContext)
@@ -829,6 +832,8 @@ func listPathRaw(ctx context.Context, opts listPathRawOptions) (err error) {
 		if err != nil {
 			return err
 		}
+		// Make sure we close the pipe so blocked writes doesn't stay around.
+		defer r.CloseWithError(context.Canceled)
 		// Send request to each disk.
 		go func() {
 			werr := d.WalkDir(ctx, WalkDirOptions{
@@ -838,7 +843,10 @@ func listPathRaw(ctx context.Context, opts listPathRawOptions) (err error) {
 				ReportNotFound: opts.reportNotFound,
 				FilterPrefix:   opts.filterPrefix}, w)
 			w.CloseWithError(werr)
-			if werr != io.EOF && werr != nil && werr.Error() != errFileNotFound.Error() && werr.Error() != errVolumeNotFound.Error() {
+			if werr != io.EOF && werr != nil &&
+				werr.Error() != errFileNotFound.Error() &&
+				werr.Error() != errVolumeNotFound.Error() &&
+				!errors.Is(werr, context.Canceled) {
 				logger.LogIf(ctx, werr)
 			}
 		}()
