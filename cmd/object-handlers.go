@@ -1414,12 +1414,12 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
 		return
 	}
-
+	// 服务端不支持SSE-KMS加密
 	if crypto.S3KMS.IsRequested(r.Header) { // SSE-KMS is not supported
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
 		return
 	}
-
+	// 如果http消息是加密的，判断服务端是否支持加密
 	if _, ok := crypto.IsRequested(r.Header); ok {
 		if globalIsGateway {
 			if crypto.SSEC.IsRequested(r.Header) && !objectAPI.IsEncryptionSupported() {
@@ -1442,20 +1442,20 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// X-Amz-Copy-Source shouldn't be set for this call.
+	// 先验证header里面有没有x-amz-copy-source
 	if _, ok := r.Header[xhttp.AmzCopySource]; ok {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidCopySource), r.URL)
 		return
 	}
 
-	// Validate storage class metadata if present
+	// 校验metadata
 	if sc := r.Header.Get(xhttp.AmzStorageClass); sc != "" {
 		if !storageclass.IsValid(sc) {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidStorageClass), r.URL)
 			return
 		}
 	}
-
+	//获取header带有的文件的md5
 	clientETag, err := etag.FromContentMD5(r.Header)
 	if err != nil {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidDigest), r.URL)
@@ -1463,6 +1463,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	/// if Content-Length is unknown/missing, deny the request
+	//检验X-Amz-Decoded-Content-Length是否存在
 	size := r.ContentLength
 	rAuthType := getRequestAuthType(r)
 	if rAuthType == authTypeStreamingSigned {
@@ -1483,7 +1484,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	/// maximum Upload size for objects in a single operation
+	/// 检查单个op传输文件的大小，是否超过最大
 	if isMaxObjectSize(size) {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrEntityTooLarge), r.URL)
 		return
@@ -1494,7 +1495,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
-
+	//获取对象的标签信息
 	if objTags := r.Header.Get(xhttp.AmzObjectTagging); objTags != "" {
 		if !objectAPI.IsTaggingSupported() {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrNotImplemented), r.URL)
@@ -1517,12 +1518,12 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		putObject = objectAPI.PutObject
 	)
 
-	// Check if put is allowed
+	// 检查是否允许上传
 	if s3Err = isPutActionAllowed(ctx, rAuthType, bucket, object, r, iampolicy.PutObjectAction); s3Err != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
-
+	//判断身份认证是v2还是v4认证，
 	switch rAuthType {
 	case authTypeStreamingSigned:
 		// Initialize stream signature verifier.
@@ -1554,6 +1555,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// Check if bucket encryption is enabled
+	//判断bucket是否加密
 	_, err = globalBucketSSEConfigSys.Get(bucket)
 	// This request header needs to be set prior to setting ObjectOptions
 	if (globalAutoEncryption || err == nil) && !crypto.SSEC.IsRequested(r.Header) {
@@ -1561,6 +1563,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	actualSize := size
+	//判断服务端是否支持压缩和http header中是否带有压缩信息
 	if objectAPI.IsCompressionSupported() && isCompressible(r.Header, object) && size > 0 {
 		// Storing the compression metadata.
 		metadata[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV2
@@ -1601,7 +1604,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	if api.CacheAPI() != nil {
 		putObject = api.CacheAPI().PutObject
 	}
-
+	//是否允许上传对象的保留期限和上传对象的合法持有期操作
 	retPerms := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, iampolicy.PutObjectRetentionAction)
 	holdPerms := isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, iampolicy.PutObjectLegalHoldAction)
 
@@ -1609,7 +1612,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	if api.CacheAPI() != nil {
 		getObjectInfo = api.CacheAPI().GetObjectInfo
 	}
-
+	//检查是否允许上传对象锁
 	retentionMode, retentionDate, legalHold, s3Err := checkPutObjectLockAllowed(ctx, r, bucket, object, getObjectInfo, retPerms, holdPerms)
 	if s3Err == ErrNone && retentionMode.Valid() {
 		metadata[strings.ToLower(xhttp.AmzObjectLockMode)] = string(retentionMode)
@@ -1625,6 +1628,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	if ok, _ := mustReplicate(ctx, r, bucket, object, metadata, ""); ok {
 		metadata[xhttp.AmzBucketReplicationStatus] = replication.Pending.String()
 	}
+	//判断header中包含有桶复制的状态信息
 	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
 		if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, iampolicy.ReplicateObjectAction); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
@@ -1632,6 +1636,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		}
 	}
 	var objectEncryptionKey crypto.ObjectKey
+	//服务端加密处理
 	if objectAPI.IsEncryptionSupported() {
 		if _, ok := crypto.IsRequested(r.Header); ok && !HasSuffix(object, SlashSeparator) { // handle SSE requests
 			if crypto.SSECopy.IsRequested(r.Header) {
@@ -1666,16 +1671,19 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// Ensure that metadata does not contain sensitive information
+	// 删除元数据的敏感信息
 	crypto.RemoveSensitiveEntries(metadata)
 
 	oc := newObjSweeper(bucket, object)
 	// Get appropriate object info to identify the remote object to delete
 	goiOpts := oc.GetOpts()
+	//获取对象的信息
 	if goi, gerr := getObjectInfo(ctx, bucket, object, goiOpts); gerr == nil {
 		oc.SetTransitionState(goi)
 	}
 
 	// Create the object..
+	// 开始处理对象上传
 	objInfo, err := putObject(ctx, bucket, object, pReader, opts)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
@@ -1701,6 +1709,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 			objInfo.ETag = objInfo.ETag + "-1"
 		}
 	}
+	//对象是否需要复制，如果是，执行同步或者异步复制操作。
 	if replicate, sync := mustReplicate(ctx, r, bucket, object, metadata, ""); replicate {
 		scheduleReplication(ctx, objInfo.Clone(), objectAPI, sync, replication.ObjectReplicationType)
 	}
@@ -1709,10 +1718,11 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	logger.LogIf(ctx, oc.Sweep())
 
 	setPutObjHeaders(w, objInfo, false)
-
+	//对象上传成功消息头设置
 	writeSuccessResponseHeadersOnly(w)
 
 	// Notify object created event.
+	//回复给客户端的消息
 	sendEvent(eventArgs{
 		EventName:    event.ObjectCreatedPut,
 		BucketName:   bucket,

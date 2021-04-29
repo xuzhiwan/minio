@@ -80,6 +80,7 @@ func (e *Erasure) Encode(ctx context.Context, src io.Reader, writers []io.Writer
 
 	for {
 		var blocks [][]byte
+		//从上传文件流中读取数据，填充到buffer中
 		n, err := io.ReadFull(src, buf)
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			logger.LogIf(ctx, err)
@@ -91,12 +92,13 @@ func (e *Erasure) Encode(ctx context.Context, src io.Reader, writers []io.Writer
 			break
 		}
 		// We take care of the situation where if n == 0 and total == 0 by creating empty data and parity files.
+		//纠删码编码，生成数据块和冗余块
 		blocks, err = e.EncodeData(ctx, buf[:n])
 		if err != nil {
 			logger.LogIf(ctx, err)
 			return 0, err
 		}
-
+		//数据落盘，调用parallelWriter 并行写入数据
 		if err = writer.Write(ctx, blocks); err != nil {
 			logger.LogIf(ctx, err)
 			return 0, err

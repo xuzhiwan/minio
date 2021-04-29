@@ -603,9 +603,9 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 	if opts.UserDefined == nil {
 		opts.UserDefined = make(map[string]string)
 	}
-
+	// 获取该对象对应的所有磁盘
 	storageDisks := er.getDisks()
-
+	// 基于metadata获取数据块和校验块的Drive的数量，默认数据块和校验块都是N/2, N是Drive的总数,默认的纠删比是1:1
 	parityDrives := len(storageDisks) / 2
 	if !opts.MaxParity {
 		// Get parity and data drive count based on storage class metadata
@@ -614,16 +614,19 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 			parityDrives = er.defaultParityCount
 		}
 	}
+	//dataDrivers用于存储纠删码中的数据盘，parityDrivers用于存储纠删码中的冗余盘
 	dataDrives := len(storageDisks) - parityDrives
 
 	// we now know the number of blocks this object needs for data and parity.
 	// writeQuorum is dataBlocks + 1
+	//数据块的集合
 	writeQuorum := dataDrives
 	if dataDrives == parityDrives {
 		writeQuorum++
 	}
 
 	// Validate input data size and it can never be less than zero.
+	//数据大小不能小于0
 	if data.Size() < -1 {
 		logger.LogIf(ctx, errInvalidArgument, logger.Application)
 		return ObjectInfo{}, toObjectErr(errInvalidArgument)
@@ -647,20 +650,23 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 	fi.DataDir = mustGetUUID()
 
 	// Initialize erasure metadata.
+	//初始化纠删码的元数据
 	for index := range partsMetadata {
 		partsMetadata[index] = fi
 	}
 
 	// Order disks according to erasure distribution
+	// 根据erasure distribution对磁盘排序
 	var onlineDisks []StorageAPI
 	onlineDisks, partsMetadata = shuffleDisksAndPartsMetadata(storageDisks, partsMetadata, fi)
-
+	//根据数据块和校验块的数量生成一个新的erasure对象
 	erasure, err := NewErasure(ctx, fi.Erasure.DataBlocks, fi.Erasure.ParityBlocks, fi.Erasure.BlockSize)
 	if err != nil {
 		return ObjectInfo{}, toObjectErr(err, bucket, object)
 	}
 
 	// Fetch buffer for I/O, returns from the pool if not allocates a new one and returns.
+	//创建一个buffer用于IO.
 	var buffer []byte
 	switch size := data.Size(); {
 	case size == 0:
@@ -685,6 +691,7 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 	}
 
 	partName := "part.1"
+	// 生成一个临时的erasure对象
 	tempErasureObj := pathJoin(uniqueID, fi.DataDir, partName)
 
 	// Delete temporary object in the event of failure.
@@ -717,10 +724,13 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 			writers[i] = newStreamingBitrotWriterBuffer(inlineBuffers[i], DefaultBitrotAlgorithm, erasure.ShardSize())
 			continue
 		}
+		// 生成一个writer,并加入到writes的切片中,采用bitrot技术保证数据的正确性，bitrot是指位衰减具体逻辑在newStreamingBitrotWriter中。
+		//本质就是在写数据之前，先计算好数据的 hash，然后将 hash 先写入磁盘，再写入需要存储的数据。这样读取数据时，就可以通过重新计
+		//算hash，和原始写入的 hash进行一致性比较，来判断数据是否有损坏
 		writers[i] = newBitrotWriter(disk, minioMetaTmpBucket, tempErasureObj,
 			shardFileSize, DefaultBitrotAlgorithm, erasure.ShardSize(), false)
 	}
-
+	// 核心数据处理逻辑：erasure对象编码，并调用writer并行写入数据。
 	n, erasureErr := erasure.Encode(ctx, data, writers, buffer, writeQuorum)
 	closeBitrotWriters(writers)
 	if erasureErr != nil {
@@ -766,10 +776,11 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 	}
 
 	// Guess content-type from the extension if possible.
+	//设置文件的类型
 	if opts.UserDefined["content-type"] == "" {
 		opts.UserDefined["content-type"] = mimedb.TypeByExtension(path.Ext(object))
 	}
-
+	//设置修改时间
 	modTime := opts.MTime
 	if opts.MTime.IsZero() {
 		modTime = UTCNow()
@@ -784,6 +795,8 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 	}
 
 	// Rename the successfully written temporary object to final location.
+	// 把临时文件rename成最终的文件。Minio 不是直接上传到 object 在磁盘的最终存储目录的，而是先写到一个临时目录，等所有数据都写到临时
+	// 目录后，Minio 才会进行 rename 操作，将 object 数据存储到最终存储目录。
 	if onlineDisks, err = renameData(ctx, onlineDisks, minioMetaTmpBucket, tempObj, partsMetadata, bucket, object, writeQuorum); err != nil {
 		logger.LogIf(ctx, err)
 		return ObjectInfo{}, toObjectErr(err, bucket, object)
@@ -809,6 +822,7 @@ func (er erasureObjects) putObject(ctx context.Context, bucket string, object st
 	}
 	online = countOnlineDisks(onlineDisks)
 
+	// 最后把metadata信息转换成ObjectInfo对象返回
 	return fi.ToObjectInfo(bucket, object), nil
 }
 
